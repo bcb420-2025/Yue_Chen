@@ -1,0 +1,204 @@
+---
+title: "RNA-seq Data Preprocessing: GSE173955"
+author: "Yue Chen"
+date: "2025 Feb 11"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# **1. Introduction**
+This notebook preprocesses RNA-seq expression data from the **GSE173955** dataset, sourced from **GEO**. The dataset investigates gene expression in **postmortem brain tissues** from **Alzheimer’s Disease (AD) patients and healthy controls**.
+
+## **Dataset Information:**
+- **Source:** GEO (GSE173955)
+- **Publication:** *MUTYH Actively Contributes to Microglial Activation and Impaired Neurogenesis in the Pathogenesis of Alzheimer's Disease*
+- **Material:** Postmortem brain tissue from **8 AD** and **10 control** samples
+- **Goal:** To obtain **expression profiles** for genes related to **MUTYH** and **transcript variants**.
+
+---
+---
+
+# **2. Data Acquisition**
+## **2.1 Install & Load Required Libraries**
+```{r libraries}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("GEOquery", "org.Hs.eg.db", "AnnotationDbi", "edgeR", "readxl"))
+
+library(GEOquery)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(edgeR)
+library(readxl)
+```
+
+## **2.2 Download Expression Data from GEO**
+This step was done using the code in Lecture 4.
+```{r download_data}
+data_set_geoid <- "GSE173955"
+gse <- getGEO(data_set_geoid, GSEMatrix=FALSE)
+
+sfilenames <- getGEOSuppFiles(data_set_geoid, fetch_files = FALSE)
+data_filename <- sfilenames$fname[2]
+
+download_dir <- file.path(getwd())
+missing_files <- sfilenames$fname[!unlist(
+  lapply(sfilenames$fname, function(x) file.exists(file.path(download_dir, data_set_geoid, x))))]
+
+if (length(missing_files) > 0) {
+  for (i in 1:length(missing_files)) {
+    getGEOSuppFiles(data_set_geoid, filter_regex = missing_files[i], baseDir = download_dir, fetch_files = TRUE)
+  }
+}
+```
+## **2.4 Load Data**
+```{r load_data}
+ad_data <- read_excel(file.path(download_dir, data_set_geoid, data_filename), sheet = 1)
+```
+
+---
+
+# **3. Data Cleaning & Mapping to HUGO Symbols**
+
+## **3.1 Rename Columns**
+Rename the columns to unwrap the data set
+```{r rename_columns}
+colnames(ad_data) <- c("Transcript_ID", paste0("AD_Sample_", 1:9), "Mean_AD", "SD_AD",
+                        paste0("Non_AD_Sample_", 1:9), "Mean_Non_AD", "SD_Non_AD",
+                        "log2_FC", "Avg_abundance_log2CPM", "Likelihood_Ratio", "P_value", "FDR", 
+                        "Chromosome", "Location_Start", "Location_End", "Gene_Symbol", "RefSeq_ID")
+# Delete the original column names
+ad_data <- ad_data[-c(1, 2), ]
+```
+
+## **3.2 Map Gene Symbols**
+Since the Gene Symbols column is already in HUGO format, I only need to check whether it's complete or not.
+```{r map_genes}
+# Check if all gene symbols exist
+sum(is.na(ad_data$Gene_Symbol))
+```
+
+---
+
+# **4. Outlier Detection & Removal**
+## **4.1 Identify Outliers Using 3-SD Rule**
+Because the value in ad_data is not numeric, they need to be converted into numeric first.
+```{r find_outliers}
+ad_data[, grep("AD_Sample|Non_AD_Sample", names(ad_data))] <- 
+  lapply(ad_data[, grep("AD_Sample|Non_AD_Sample", names(ad_data))], as.numeric)
+ad_cols <- grep("^AD_Sample", colnames(ad_data), value = TRUE)
+non_ad_cols <- grep("Non_AD_Sample", colnames(ad_data), value = TRUE)
+expression_cols <- c(ad_cols, non_ad_cols)
+
+outliers <- apply(ad_data[, expression_cols], 2, function(x) {
+  x > mean(x, na.rm=TRUE) + 3 * sd(x, na.rm=TRUE) |
+    x < mean(x, na.rm=TRUE) - 3 * sd(x, na.rm=TRUE)
+})
+
+total_outliers <- sum(outliers, na.rm=TRUE)
+total_outliers
+```
+
+## **4.2 Remove Outliers**
+```{r}
+genes_with_outliers <- rowSums(outliers) > 0
+ad_data_filtered <- ad_data[!genes_with_outliers, ]
+```
+
+---
+
+# **5. Normalization**
+## **5.1 Convert Data to Numeric & Create DGEList**
+```{r create_dge}
+dge <- DGEList(counts = as.matrix(ad_data[, grep("AD_Sample", names(ad_data))]))
+```
+
+## **5.2 Apply CPM Normalization**
+```{r normalize_data}
+# I set this value to be 9 because there are 18 samples in total
+# Get rid off the very small value
+keep_lax <- rowSums(cpm(dge)>1) >9
+n_data <- cpm(dge, log = TRUE)
+n_data <- n_data[!keep_lax,]
+```
+
+---
+
+# **6. Data Visualization**
+## **6.1 Boxplot Before & After Normalization**
+```{r boxplot_before_after}
+par(mfrow=c(1,2))
+# Align the reading to a log base
+log_raw_counts <- log2(dge$counts + 1)
+colors <- rainbow(ncol(log_raw_counts))
+boxplot(log_raw_counts, las=2, col=rainbow(ncol(dge$counts)), 
+        main="Counts Distribution Before Normalization", ylab="Log2 Counts",
+        cex.axis=0.5) 
+boxplot(n_data, las=2, col=rainbow(ncol(dge$counts)), 
+        main="Counts Distribution After Normalization", ylab="Log2 Counts",
+        cex.axis=0.5)
+par(mfrow=c(1,1))
+```
+## **6.2 Density Plot Before & After Normalization**
+```{r density_plot_before_after}
+par(mfrow=c(1,2))
+plot(density(log2(dge$counts[,1] + 1)), col=rainbow(ncol(dge$counts))[1], 
+     main="Density Before Normalization", xlab="Log2 Counts", ylab="Density")
+for (i in 2:ncol(dge$counts)) {
+  lines(density(log2(dge$counts[,i] + 1)), col=rainbow(ncol(dge$counts))[i])
+}
+
+plot(density(n_data[,1]), col=rainbow(ncol(n_data))[1], 
+     main="Density After Normalization", xlab="Log2 CPM", ylab="Density")
+for (i in 2:ncol(n_data)) {
+  lines(density(n_data[,i]), col=rainbow(ncol(n_data))[i])
+}
+par(mfrow=c(1,1))
+```
+
+---
+
+# **7. Save Final Processed Data**
+```
+n_data_df <- as.data.frame(n_data)
+n_data_df$Gene_Symbol <- ad_data_filtered$Gene_Symbol
+```
+
+---
+
+# **8. Interpret, and document**
+- Why is the dataset of interest to you?
+
+This dataset is interesting because my grandmother is an AD patient. This dataset focuses on Alzheimer’s Disease (AD) and how the MUTYH gene affects microglial activation and neurogenesis. This is a really good dataset, because it contains lost of experiment groups(18), good data, begin and end position, and already has some statistical data I can refer to. Understanding gene expression in AD patients can help in finding new biomarkers and potential treatments.
+
+- What are the control and test conditions of the dataset?
+
+Control Group: Brain tissue from healthy individuals.There are 10 non AD groups.
+Test Group: Brain tissue from Alzheimer’s Disease (AD) patients.There are 8 AD groups.
+Those material are from 3 Ad and # non-AD volunteer in Japan. RIP.
+
+- How many samples in each of the conditions of your dataset?
+
+As mentioned before, there are 8 AD samples and 10 Non-AD(control) samples.
+
+- Were there expression values that were not unique for specific genes? How did you handle these?
+
+No, I checked into Gene_Symbols column in my dataset, found no duplicated genes exist.I assume this means I'm safe, no duplicate expression values recorded for any gene.
+
+- Were there expression values that could not be mapped to current HUGO symbols?
+
+No. This dataset is really good and it already contains the HUGO symbols. I don't need to do name convertion.
+
+- Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were     removed?
+
+Yes. There are 639 outliers in my dataset. I looked into the article, seems like authors do not provide specific details on how they handled outliers in their data analysis. I interupt they did some statistical analysis and just simply remove the outliers.
+
+- How did you handle replicates?
+
+AD condition had 8 replicates and Non-AD condition had 10 biological replicates. I used CPM normalization to make the samples comparable. I also checked if any replicate had very different expression patterns, but they all looked fine.
+
+- What is the final coverage of your dataset?
+
+After filtering low-expression genes, the dataset contains only high-quality genes with normalized expression values. The coverage rate is approximately 99.88%
+---
