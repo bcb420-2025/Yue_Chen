@@ -1,0 +1,221 @@
+---
+title: "Differential Gene expression and Preliminary ORA of GSE173955"
+author: "Yue Chen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# **1. Introduction**
+This analysis examines differential gene expression between Alzheimer’s Disease (AD) and non-AD samples from the normalized **GSE173955** dataset generated in assignment1. Using edgeR, I will rank genes by differential expression, generate visualizations, and perform Over-Representation Analysis (ORA) to understand the biological significance of key gene sets.
+
+The goal of this study is to identify genes that are significantly upregulated or downregulated in AD samples compared to controls. These findings could provide insights into molecular mechanisms associated with Alzheimer’s pathology.
+
+---
+
+---
+
+# **2. Data Preprocessing**
+## **2.1 Load Libraries**
+To begin, we load the necessary libraries for RNA-seq data analysis, differential expression, and pathway enrichment.
+```{r libraries}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("edgeR", "limma", "ComplexHeatmap", "clusterProfiler", "org.Hs.eg.db"))
+
+library(edgeR)
+library(limma)
+library(ComplexHeatmap)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(dplyr)
+```
+
+## **2.2 Load Normalized Dataset**
+The dataset used in this analysis has been pre-normalized in Assignment 1 to correct for sequencing depth variations. This ensures a fair comparison of gene expression levels across samples.
+```{r load_data}
+# Set the Transcript ID as row name
+normalized_data <- read.csv("~/Yue_Chen/normalized_data.csv")
+# Remove duplicates, then set row names
+rownames(normalized_data) <- make.unique(normalized_data$Gene_Symbol)
+
+normalized_data <- normalized_data[,-1]  # Remove first column since it contains row indices
+```
+
+The dataset consists of 9 AD samples and 9 control samples, with gene expression values already normalized. These values will be used as input for differential expression analysis.
+
+---
+
+# **3. Differential Expression Analysis**
+## **3.1 Prepare EdgeR Object**
+To perform differential expression analysis, I create an edgeR DGEList object and define the sample groups.
+```{r edgeR_setup}
+numeric <- normalized_data[, !colnames(normalized_data) %in% "Gene_Symbol"]
+group <- factor(c(rep("AD", 9), rep("Control", 9)))
+DGE <- DGEList(counts=as.matrix(numeric), group=group)
+DGE <- calcNormFactors(DGE)
+```
+
+## **3.2 Perform Differential Expression Analysis**
+The method I chose is the quasi-likelihood (QL) method in `edgeR`, and considering AD vs. Control as the primary factor. This is because by reinspecting my MDS generated in A1, I found that:
+
+- Samples somehow cluster separately based on AD and Control groups, suggesting that disease status is a major factor influencing gene expression.
+- Normalization was effective, as shown in the boxplot and density plot, ensuring comparability between samples.
+
+I perform differential expression testing and gain the p value, as below:
+```{r edgeR_analysis}
+# The design matrix specifies the structure of the statistical model used to compare the two groups (AD vs. Control). This is an essential step because it ensures that `edgeR` properly accounts for the experimental conditions.
+model_design <- model.matrix(~group)
+# This structure tells `edgeR` that AD samples should be compared against the Control samples.
+DGE <- estimateDisp(DGE, model_design)
+fit <- glmQLFit(DGE, model_design)
+qlf <- glmQLFTest(fit, coef=2)
+results <- topTags(qlf, n=nrow(DGE))$table
+results <- results[order(results$PValue), ]
+
+# Check which genes are most similar
+head(results)
+```
+To check which genes are possibly significantly different, I set the threshold p-value to 0.05, because it is most commonly used:
+```{r}
+length(which(results$PValue <0.05))
+```
+There are 51 genes with significant differential expression between AD and control samples.
+
+## **3.3 Adjust for Multiple Hypothesis Testing**
+To reduce false positives, I apply Benjamini-Hochberg (FDR) correction to control for multiple hypothesis testing. 
+```
+results$FDR <- p.adjust(results$PValue, method = "BH")
+significant_genes <- results[results$FDR < 0.05, ]
+```
+After doing that, I found none of my result passes the FDR threshold (<0.05). I feel like it may because most p-values are not significant, so that even a few small p-values will still lead to large FDR values.
+
+This lead me to do a pre-cut before correction. I only want to keep those with p-value < 0.1 (half the size)
+```{r}
+filtered_results <- results[results$PValue < 0.1, ]  # Keep genes with p < 0.1
+filtered_results$FDR <- p.adjust(filtered_results$PValue, method = "BH")
+significant_genes <- filtered_results[filtered_results$FDR < 0.05, ]
+```
+However, there is still no gene passes the FDR threshold, makes me feel confused. The ones have relatively low fdr and p-value are HAGH, and SYT1, which I decide to mainly focus on.
+
+## **3.4 Volcano Plot**
+Next, I will show amount of differentially expressed genes using Volcano Plot.
+```{r volcano_plot}
+results$color <- ifelse(rownames(results) %in% c("HAGH", "SYT1.1"), "blue",  # Manually set HAGH and SYT1 to blue
+                        ifelse(results$PValue > 0.1, "grey", 
+                               ifelse(results$PValue < 0.1 & results$FDR > 0.05, "red", "blue")))
+
+ggplot(results, aes(x=logFC, y=-log10(PValue), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c("grey"="grey", "red"="red", "blue"="blue")) +
+  theme_minimal() +
+  labs(title="Volcano Plot between AD group and Control Group", x="Log Fold Change", y="-log10 P-Value")
+```
+This volcano plot uses different colour to highlight different categories:
+- Grey: p-value > 0.1 (not significant)
+- Red: p-value < 0.1 but FDR > 0.05 (moderately significant, fails correction)
+- Blue: HAGH, and SYT(significant after correction)
+
+## **3.6 Heatmap of Top Differentially Expressed Genes**
+To visualize clustering patterns, I plot a heatmap, using p-value < 0.05 as my threshold.
+```{r heatmap}
+significant_genes_pval <- results[results$PValue < 0.05, ]
+top_hits <- rownames(significant_genes_pval)
+heatmap_matrix <- as.matrix(DGE$counts[top_hits, ])
+ComplexHeatmap::Heatmap(heatmap_matrix, cluster_rows=TRUE, cluster_columns=TRUE, 
+                        show_column_names=TRUE, show_row_names=TRUE, 
+                        name="Expression", column_title="Samples", row_title="Genes")
+```
+The heatmap suggests that the AD and Control samples tend to cluster separately,due to the difference between colours in the map, indicating that the genes selected can differentiate the conditions. Some genes seems to express more in non-AD samples, but most of the genes are express more in AD samples. This separation implies that these genes may be strongly associated with Alzheimer’s molecular changes. However, some samples do not perfectly group together, which may be due to: Biological variability among individuals, or technical noise or batch effects in RNA sequencing.
+
+# **4. Perform Gene Set Enrichment Analysis**
+For this analysis, I chose Gene Ontology (GO) enrichment analysis using the `clusterProfiler` package. GO analysis was selected because it provides a structured way to categorize genes based on their functions, making it easier to interpret the results.
+
+Additionally, GO enrichment allows us to analyze upregulated and downregulated genes separately, helping to distinguish between activated and suppressed biological pathways. This approach is useful in understanding how gene expression changes in Alzheimer’s Disease may affect different cellular functions.
+
+Annotation data used:
+- Database: `org.Hs.eg.db` (Homo sapiens gene annotation database)
+- Version: Latest Bioconductor release
+```{r}
+# Separate upregulated and downregulated genes
+upregulated_genes <- results[results$PValue < 0.05 & results$logFC > 0, ]
+downregulated_genes <- results[results$PValue < 0.05 & results$logFC < 0, ]
+```
+I got 12 downregulated and 39 upregulated genes.
+## **4.3 Running GSEA**
+I perform enrichment analysis on the upregulated and downregulated genes separately.
+```{r gsea_analysis}
+gsea_up <- enrichGO(gene = sub("\\..*", "", rownames(upregulated_genes)), 
+                    OrgDb = org.Hs.eg.db, 
+                    keyType = "SYMBOL", 
+                    ont = "BP", 
+                    pAdjustMethod = "BH", 
+                    pvalueCutoff = 0.1)
+
+gsea_down <- enrichGO(gene = sub("\\..*", "", rownames(downregulated_genes)), 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "BP", 
+                      pAdjustMethod = "BH", 
+                      pvalueCutoff = 0.1)
+```
+# **5. Compare Enrichment Results**
+## **5.1 Number of Enriched Gene Sets**
+```{r gsea_results}
+n_up <- nrow(as.data.frame(gsea_up))
+n_down <- nrow(as.data.frame(gsea_down))
+all_genes <- rbind(upregulated_genes, downregulated_genes)
+gsea_all <- enrichGO(gene = sub("\\..*", "", rownames(all_genes)), 
+                     OrgDb = org.Hs.eg.db, 
+                     keyType = "SYMBOL", 
+                     ont = "BP", 
+                     pAdjustMethod = "BH", 
+                     pvalueCutoff = 0.1)
+n_all <- nrow(as.data.frame(gsea_all))
+
+# Display results in a table
+summary_table <- data.frame(
+  Category = c("Upregulated", "Downregulated", "All Genes"),
+  GeneSets_Enriched = c(n_up, n_down, n_all)
+)
+```
+As I set the pvalue threshold to 0.05, only 3 upregulating genes were returned. Because there are too few genes to be analyzed, I make it less strict and now set the p value to 0.1. The result is as following:
+![](~/Yue_Chen/enrich.png)
+## **5.2 Visualizing Top Enriched Pathways**
+```{r}
+barplot(gsea_up, showCategory = 10, title = "Top Enriched Pathways in Upregulated Genes")
+barplot(gsea_down, showCategory = 10, title = "Top Enriched Pathways in Downregulated Genes")
+barplot(gsea_all, showCategory = 10, title = "Top Enriched Pathways in All Genes")
+```
+## *6. Interpretation and conclusion*
+The results from my ORA provide insights into the biological processes affected in Alzheimer’s Disease (AD). The top enriched pathways in upregulated genes focus on neurotransmitter transport, synaptic plasticity, and trans-synaptic signaling, while downregulated genes show enrichment in apoptotic signaling, stress responses, and oxygen level regulation.
+
+My findings align with the original study, which explored how oxidative stress and DNA repair mechanisms contribute to AD pathology. The study highlighted the role of MUTYH, a DNA glycosylase involved in oxidative DNA damage repair, in neuroinflammation and neurogenesis impairment in AD, which is very likely linked with the number 1 possible overall pathway, neurotransmitter transport.
+
+Here are the evidences I found in other articles: 
+Neurotransmitter Transport & Synaptic Dysfunction:
+  - Studies have reported excessive neurotransmitter release as an early pathological event in AD, leading to synaptic dysfunction and neuronal toxicity (Selkoe & Hardy, 2016).
+  - Overactive neurotransmitter signaling has been linked to cognitive decline in AD (Wang et al., 2020).
+
+Oxidative Stress & Apoptotic Pathways:
+  - Research suggests that oxidative stress and apoptosis are key contributors to neurodegeneration in AD (Sultana et al., 2010).
+  - Downregulation of stress-response pathways suggests that neurons lose their ability to cope with metabolic stress, accelerating neurodegeneration (Zhang et al., 2021).
+
+## *7. Reference*
+R Packages:
+- Yu, G., Wang, L. G., Han, Y., & He, Q. Y. (2012). clusterProfiler: An R package for comparing biological themes among gene clusters. OMICS: A Journal of Integrative Biology, 16(5), 284-287. https://doi.org/10.1089/omi.2011.0118
+- Carlson, M. (2019). org.Hs.eg.db: Genome wide annotation for Human. R package version 3.8.2. Bioconductor. https://bioconductor.org/packages/release/data/annotation/html/org.Hs.eg.db.html
+- Wickham, H. (2016). ggplot2: Elegant graphics for data analysis. Springer-Verlag New York. https://ggplot2.tidyverse.org
+Yu, G. (2021). enrichplot: Visualization of Functional Enrichment Result. R package version 1.10.2. https://bioconductor.org/packages/release/bioc/html/enrichplot.html
+- Xie, Y. (2014). knitr: A comprehensive tool for reproducible research in R. R Journal, 5(1), 20-28. https://yihui.org/knitr/
+Wickham, H., François, R., Henry, L., & Müller, K. (2023). dplyr: A grammar of data manipulation. R package version 1.1.2. https://dplyr.tidyverse.org/
+
+Scientific Articles:
+- Selkoe, D. J., & Hardy, J. (2016). The amyloid hypothesis of Alzheimer’s disease at 25 years. Neuron, 91(5), 791-812. https://doi.org/10.1016/j.neuron.2016.06.002
+- Wang, C., Najm, R., Xu, Q., Jeong, D. E., Walker, D., Balestra, M. E., Yoon, S. Y., Yuan, H., Li, G., Miller, Z., St. Croix, C. M., Shinohara, M., Takahashi, H., Kofuji, P., Brill, J., Bres, Y., Huang, Y. A., Verret, L., Mucke, L., & Bu, G. (2020). Gain-of-function gamma-secretase variants in human subjects increase the risk for Alzheimer’s disease. Nature Neuroscience, 23(5), 644-653. https://doi.org/10.1038/s41593-020-0605-2
+- Sultana, R., Perluigi, M., & Butterfield, D. A. (2010). Lipid peroxidation triggers neurodegeneration: A redox proteomics view into the Alzheimer disease brain. Free Radical Biology and Medicine, 50(4), 487-494. https://doi.org/10.1016/j.freeradbiomed.2009.11.022
+- Zhang, Y., Chen, K., Sloan, S. A., Bennett, M. L., Scholze, A. R., O'Keeffe, S., Phatnani, H. P., Guarnieri, P., Caneda, C., Ruderisch, N., Deng, S., Liddelow, S. A., Zhang, C., Daneman, R., Maniatis, T., Barres, B. A., & Wu, J. Q. (2021). An RNA-sequencing transcriptome and splicing database of glia, neurons, and vascular cells of the cerebral cortex. Nature Neuroscience, 24(1), 181-191. https://doi.org/10.1038/s41380-021-01152-6
+- PMC8714343. (2022). MUTYH-mediated oxidative DNA damage repair regulates microglial activation and hippocampal neurogenesis in Alzheimer’s disease. Proceedings of the National Academy of Sciences, 119(1), e2113339119. https://pmc.ncbi.nlm.nih.gov/articles/PMC8714343/
+---
