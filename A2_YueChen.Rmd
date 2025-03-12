@@ -22,7 +22,7 @@ The goal of this study is to identify genes that are significantly upregulated o
 To begin, we load the necessary libraries for RNA-seq data analysis, differential expression, and pathway enrichment.
 ```{r libraries}
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install(c("edgeR", "limma", "ComplexHeatmap", "clusterProfiler", "org.Hs.eg.db"))
+BiocManager::install(c("edgeR", "limma", "ComplexHeatmap", "clusterProfiler", "org.Hs.eg.db","ggrepel"))
 
 library(edgeR)
 library(limma)
@@ -31,6 +31,7 @@ library(clusterProfiler)
 library(org.Hs.eg.db)
 library(ggplot2)
 library(dplyr)
+library(ggrepel)
 ```
 
 ## **2.2 Load Normalized Dataset**
@@ -82,43 +83,45 @@ To check which genes are possibly significantly different, I set the threshold p
 ```{r}
 length(which(results$PValue <0.05))
 ```
-There are 51 genes with significant differential expression between AD and control samples.
+There are 9595 genes with significant differential expression between AD and control samples.
 
 ## **3.3 Adjust for Multiple Hypothesis Testing**
 To reduce false positives, I apply Benjamini-Hochberg (FDR) correction to control for multiple hypothesis testing. 
-```
+```{r}
 results$FDR <- p.adjust(results$PValue, method = "BH")
 significant_genes <- results[results$FDR < 0.05, ]
 ```
-After doing that, I found none of my result passes the FDR threshold (<0.05). I feel like it may because most p-values are not significant, so that even a few small p-values will still lead to large FDR values.
-
-This lead me to do a pre-cut before correction. I only want to keep those with p-value < 0.1 (half the size)
-```{r}
-filtered_results <- results[results$PValue < 0.1, ]  # Keep genes with p < 0.1
-filtered_results$FDR <- p.adjust(filtered_results$PValue, method = "BH")
-significant_genes <- filtered_results[filtered_results$FDR < 0.05, ]
-```
-However, there is still no gene passes the FDR threshold, makes me feel confused. The ones have relatively low fdr and p-value are HAGH, and SYT1, which I decide to mainly focus on.
-
+I found 36 genes with significant difference. They passed the FDR test.
 ## **3.4 Volcano Plot**
 Next, I will show amount of differentially expressed genes using Volcano Plot.
 ```{r volcano_plot}
-results$color <- ifelse(rownames(results) %in% c("HAGH", "SYT1.1"), "blue",  # Manually set HAGH and SYT1 to blue
-                        ifelse(results$PValue > 0.1, "grey", 
-                               ifelse(results$PValue < 0.1 & results$FDR > 0.05, "red", "blue")))
+# Assign colors and filter blue genes for labeling
+results$color <- ifelse(results$PValue > 0.1, "grey", 
+                        ifelse(results$PValue < 0.1 & results$FDR > 0.05, "red", "blue"))
 
+# Subset only the blue-colored genes for labeling
+blue_genes <- results[results$color == "blue", ]
+
+# Generate volcano plot
 ggplot(results, aes(x=logFC, y=-log10(PValue), color=color)) +
   geom_point() +
   scale_color_manual(values=c("grey"="grey", "red"="red", "blue"="blue")) +
   theme_minimal() +
-  labs(title="Volcano Plot between AD group and Control Group", x="Log Fold Change", y="-log10 P-Value")
+  labs(title="Volcano Plot between AD group and Control Group", 
+       x="Log Fold Change", 
+       y="-log10 P-Value") +
+  geom_text_repel(data=blue_genes, aes(label=rownames(blue_genes)), 
+                  size=3, color="black", max.overlaps=10)
 ```
-This volcano plot uses different colour to highlight different categories:
-- Grey: p-value > 0.1 (not significant)
-- Red: p-value < 0.1 but FDR > 0.05 (moderately significant, fails correction)
-- Blue: HAGH, and SYT(significant after correction)
+This heart-like volcano plot uses different colour to highlight different categories:
 
-## **3.6 Heatmap of Top Differentially Expressed Genes**
+- Grey: p-value > 0.1 (not significant)
+
+- Red: p-value < 0.1 but FDR > 0.05 (moderately significant, fails correction)
+
+- Blue: p-value < 0.1 and FDR < 0.05(significant after correction)
+
+## **3.5 Heatmap of Top Differentially Expressed Genes**
 To visualize clustering patterns, I plot a heatmap, using p-value < 0.05 as my threshold.
 ```{r heatmap}
 significant_genes_pval <- results[results$PValue < 0.05, ]
@@ -143,8 +146,9 @@ Annotation data used:
 upregulated_genes <- results[results$PValue < 0.05 & results$logFC > 0, ]
 downregulated_genes <- results[results$PValue < 0.05 & results$logFC < 0, ]
 ```
-I got 12 downregulated and 39 upregulated genes.
-## **4.3 Running GSEA**
+I got 5016 downregulated and 4579 upregulated genes.
+
+## **4.1 Running GSEA**
 I perform enrichment analysis on the upregulated and downregulated genes separately.
 ```{r gsea_analysis}
 gsea_up <- enrichGO(gene = sub("\\..*", "", rownames(upregulated_genes)), 
@@ -152,14 +156,14 @@ gsea_up <- enrichGO(gene = sub("\\..*", "", rownames(upregulated_genes)),
                     keyType = "SYMBOL", 
                     ont = "BP", 
                     pAdjustMethod = "BH", 
-                    pvalueCutoff = 0.1)
+                    pvalueCutoff = 0.05)
 
 gsea_down <- enrichGO(gene = sub("\\..*", "", rownames(downregulated_genes)), 
                       OrgDb = org.Hs.eg.db, 
                       keyType = "SYMBOL", 
                       ont = "BP", 
                       pAdjustMethod = "BH", 
-                      pvalueCutoff = 0.1)
+                      pvalueCutoff = 0.05)
 ```
 # **5. Compare Enrichment Results**
 ## **5.1 Number of Enriched Gene Sets**
@@ -172,7 +176,7 @@ gsea_all <- enrichGO(gene = sub("\\..*", "", rownames(all_genes)),
                      keyType = "SYMBOL", 
                      ont = "BP", 
                      pAdjustMethod = "BH", 
-                     pvalueCutoff = 0.1)
+                     pvalueCutoff = 0.05)
 n_all <- nrow(as.data.frame(gsea_all))
 
 # Display results in a table
@@ -181,41 +185,59 @@ summary_table <- data.frame(
   GeneSets_Enriched = c(n_up, n_down, n_all)
 )
 ```
-As I set the pvalue threshold to 0.05, only 3 upregulating genes were returned. Because there are too few genes to be analyzed, I make it less strict and now set the p value to 0.1. The result is as following:
-![](~/Yue_Chen/enrich.png)
+As I set the pvalue threshold to 0.05, only 3 upregulating genes were returned. Because there are too few genes to be analyzed, I make it less strict and now set the p value to 0.1. 
+
 ## **5.2 Visualizing Top Enriched Pathways**
 ```{r}
 barplot(gsea_up, showCategory = 10, title = "Top Enriched Pathways in Upregulated Genes")
 barplot(gsea_down, showCategory = 10, title = "Top Enriched Pathways in Downregulated Genes")
 barplot(gsea_all, showCategory = 10, title = "Top Enriched Pathways in All Genes")
 ```
-## *6. Interpretation and conclusion*
-The results from my ORA provide insights into the biological processes affected in Alzheimer’s Disease (AD). The top enriched pathways in upregulated genes focus on neurotransmitter transport, synaptic plasticity, and trans-synaptic signaling, while downregulated genes show enrichment in apoptotic signaling, stress responses, and oxygen level regulation.
 
-My findings align with the original study, which explored how oxidative stress and DNA repair mechanisms contribute to AD pathology. The study highlighted the role of MUTYH, a DNA glycosylase involved in oxidative DNA damage repair, in neuroinflammation and neurogenesis impairment in AD, which is very likely linked with the number 1 possible overall pathway, neurotransmitter transport.
+## *6. Interpretation and conclusion*
+The results from my ORA provide insights into the biological processes affected in Alzheimer’s Disease (AD).  The upregulated genes are enriched in pathways related to vesicle-mediated transport, synaptic plasticity, and neuron projection development, while downregulated genes are associated with cell adhesion, actin filament organization, and immune response regulation.
+
+My findings align with the original study by Wang et al. (2022), which explored how oxidative stress and DNA repair mechanisms contribute to AD pathology. The study highlighted the role of MUTYH, a DNA glycosylase involved in oxidative DNA damage repair, in neuroinflammation and neurogenesis impairment in AD. The study also suggested that oxidative stress and impaired DNA repair mechanisms contribute to neuroinflammation, synaptic dysfunction, and neuronal loss. My ORA results provide further evidence supporting these mechanisms, as disruptions in cell adhesion and synaptic vesicle transport are hallmarks of AD pathology.
 
 Here are the evidences I found in other articles: 
-Neurotransmitter Transport & Synaptic Dysfunction:
-  - Studies have reported excessive neurotransmitter release as an early pathological event in AD, leading to synaptic dysfunction and neuronal toxicity (Selkoe & Hardy, 2016).
-  - Overactive neurotransmitter signaling has been linked to cognitive decline in AD (Wang et al., 2020).
+ 
+Synaptic Dysfunction and Neurotransmitter Transport:
+- Increased synaptic vesicle cycling and neurotransmitter release have been observed in AD models, potentially as a compensatory response to neurodegeneration (Wang et al., 2022).
+- Selkoe & Hardy (2016) highlighted that dysregulated neurotransmitter signaling and synaptic plasticity are among the earliest molecular changes in AD.
 
-Oxidative Stress & Apoptotic Pathways:
-  - Research suggests that oxidative stress and apoptosis are key contributors to neurodegeneration in AD (Sultana et al., 2010).
-  - Downregulation of stress-response pathways suggests that neurons lose their ability to cope with metabolic stress, accelerating neurodegeneration (Zhang et al., 2021).
+Actin Cytoskeleton and Synapse Stability:
+- Downregulation of actin filament organization and supramolecular fiber regulation suggests that neuronal structural integrity is compromised, leading to progressive synaptic loss (Sultana et al., 2010).
+- Wang et al. (2022) demonstrated that actin remodeling plays a key role in neuronal function, and disruptions in cytoskeletal maintenance can lead to dendritic spine collapse and impaired synaptic communication.
 
 ## *7. Reference*
 R Packages:
-- Yu, G., Wang, L. G., Han, Y., & He, Q. Y. (2012). clusterProfiler: An R package for comparing biological themes among gene clusters. OMICS: A Journal of Integrative Biology, 16(5), 284-287. https://doi.org/10.1089/omi.2011.0118
-- Carlson, M. (2019). org.Hs.eg.db: Genome wide annotation for Human. R package version 3.8.2. Bioconductor. https://bioconductor.org/packages/release/data/annotation/html/org.Hs.eg.db.html
-- Wickham, H. (2016). ggplot2: Elegant graphics for data analysis. Springer-Verlag New York. https://ggplot2.tidyverse.org
-Yu, G. (2021). enrichplot: Visualization of Functional Enrichment Result. R package version 1.10.2. https://bioconductor.org/packages/release/bioc/html/enrichplot.html
-- Xie, Y. (2014). knitr: A comprehensive tool for reproducible research in R. R Journal, 5(1), 20-28. https://yihui.org/knitr/
-Wickham, H., François, R., Henry, L., & Müller, K. (2023). dplyr: A grammar of data manipulation. R package version 1.1.2. https://dplyr.tidyverse.org/
 
-Scientific Articles:
+- Robinson, M. D., McCarthy, D. J., & Smyth, G. K. (2010). edgeR: A Bioconductor package for differential expression analysis of digital gene expression data. Bioinformatics, 26(1), 139-140. https://doi.org/10.1093/bioinformatics/btp616
+
+- Ritchie, M. E., Phipson, B., Wu, D., Hu, Y., Law, C. W., Shi, W., & Smyth, G. K. (2015). limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Research, 43(7), e47. https://doi.org/10.1093/nar/gkv007
+
+- Gu, Z., Eils, R., & Schlesner, M. (2016). ComplexHeatmap: An R package for flexible visualization of multi-dimensional genomic data. Bioinformatics, 32(18), 2847-2849. https://doi.org/10.1093/bioinformatics/btw313
+
+- Yu, G., Wang, L. G., Han, Y., & He, Q. Y. (2012). clusterProfiler: An R package for comparing biological themes among gene clusters. OMICS: A Journal of Integrative Biology, 16(5), 284-287. https://doi.org/10.1089/omi.2011.0118
+
+- Carlson, M. (2019). org.Hs.eg.db: Genome wide annotation for Human. Bioconductor. https://bioconductor.org/packages/release/data/annotation/html/org.Hs.eg.db.html
+
+- Wickham, H. (2016). ggplot2: Elegant graphics for data analysis. Springer-Verlag New York. https://ggplot2.tidyverse.org
+
+- Wickham, H., François, R., Henry, L., & Müller, K. (2023). dplyr: A grammar of data manipulation. R package version 1.1.2. https://dplyr.tidyverse.org
+
+- Slowikowski, K. (2021). ggrepel: Automatically position non-overlapping text labels with 'ggplot2'. R package version 0.9.1. https://CRAN.R-project.org/package=ggrepel
+
+Scientific Articles
+
 - Selkoe, D. J., & Hardy, J. (2016). The amyloid hypothesis of Alzheimer’s disease at 25 years. Neuron, 91(5), 791-812. https://doi.org/10.1016/j.neuron.2016.06.002
-- Wang, C., Najm, R., Xu, Q., Jeong, D. E., Walker, D., Balestra, M. E., Yoon, S. Y., Yuan, H., Li, G., Miller, Z., St. Croix, C. M., Shinohara, M., Takahashi, H., Kofuji, P., Brill, J., Bres, Y., Huang, Y. A., Verret, L., Mucke, L., & Bu, G. (2020). Gain-of-function gamma-secretase variants in human subjects increase the risk for Alzheimer’s disease. Nature Neuroscience, 23(5), 644-653. https://doi.org/10.1038/s41593-020-0605-2
+
+- Wang, C., Najm, R., Xu, Q., Jeong, D. E., Walker, D., Balestra, M. E., Yoon, S. Y., Yuan, H., Li, G., Miller, Z., St. Croix, C. M., Shinohara, M., Takahashi, H., Kofuji, P., Brill, J., Bres, Y., Huang, Y. A., Verret, L., Mucke, L., & Bu, G. (2020).
+Gain-of-function gamma-secretase variants in human subjects increase the risk for Alzheimer’s disease. Nature Neuroscience, 23(5), 644-653. https://doi.org/10.1038/s41593-020-0605-2
+
 - Sultana, R., Perluigi, M., & Butterfield, D. A. (2010). Lipid peroxidation triggers neurodegeneration: A redox proteomics view into the Alzheimer disease brain. Free Radical Biology and Medicine, 50(4), 487-494. https://doi.org/10.1016/j.freeradbiomed.2009.11.022
-- Zhang, Y., Chen, K., Sloan, S. A., Bennett, M. L., Scholze, A. R., O'Keeffe, S., Phatnani, H. P., Guarnieri, P., Caneda, C., Ruderisch, N., Deng, S., Liddelow, S. A., Zhang, C., Daneman, R., Maniatis, T., Barres, B. A., & Wu, J. Q. (2021). An RNA-sequencing transcriptome and splicing database of glia, neurons, and vascular cells of the cerebral cortex. Nature Neuroscience, 24(1), 181-191. https://doi.org/10.1038/s41380-021-01152-6
+
 - PMC8714343. (2022). MUTYH-mediated oxidative DNA damage repair regulates microglial activation and hippocampal neurogenesis in Alzheimer’s disease. Proceedings of the National Academy of Sciences, 119(1), e2113339119. https://pmc.ncbi.nlm.nih.gov/articles/PMC8714343/
+
+
 ---
